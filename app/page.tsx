@@ -62,6 +62,10 @@ export default function Home() {
   const [activeNav, setActiveNav] = useState("Create");
   const [isGenerating, setIsGenerating] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [showConnections, setShowConnections] = useState(false);
+  const [connectionBusy, setConnectionBusy] = useState(false);
+  const [connectionMode, setConnectionMode] = useState<"demo" | "live">("demo");
+  const [connection, setConnection] = useState({ provider: "gmicloud", provider_api_key: "", b2_key_id: "", b2_app_key: "", b2_bucket: "", b2_endpoint: "https://s3.us-west-004.backblazeb2.com" });
   const [notice, setNotice] = useState("");
   const [showJson, setShowJson] = useState(false);
   const [referenceLock, setReferenceLock] = useState(true);
@@ -84,16 +88,48 @@ export default function Home() {
     toast("Continuity specification compiled and locked");
   };
 
-  const generate = () => {
-    if (!connected) {
-      toast("Demo pipeline running — connect a provider for live generation");
-    }
+  const generate = async () => {
     setIsGenerating(true);
-    window.setTimeout(() => {
+    try {
+      const response = await fetch("/api/runs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          project_id: "the-last-train", shot_id: `shot-${activeShot}`,
+          provider: connection.provider, model: "Kling-Image2Video-V2.1-Master",
+          specification: { ...characterSpec, project_brief: brief, shot: shots.find((shot) => shot.id === activeShot) },
+          reference_urls: ["b2://projects/the-last-train/references/mara/front.png"],
+          previous_clean_frame_url: frameHandoff ? "b2://projects/the-last-train/shots/shot-01/clean-end.png" : null,
+          budget_usd: Number(estimatedCost),
+          ...(connected && connectionMode === "live" ? { connection } : {}),
+        }),
+      });
+      if (!response.ok) throw new Error((await response.json()).detail ?? "Generation request failed");
+      const result = await response.json();
+      window.setTimeout(() => {
+        setIsGenerating(false);
+        setShots((current) => current.map((shot) => shot.id === activeShot ? { ...shot, status: "approved", continuity: 95 } : shot));
+        toast(result.mode === "live" ? `Live run ${result.id} queued` : "Demo run complete · connect the media worker for live generation");
+      }, 1400);
+    } catch (error) {
       setIsGenerating(false);
-      setShots((current) => current.map((shot) => shot.id === activeShot ? { ...shot, status: "approved", continuity: 95 } : shot));
-      toast("Shot approved · final frame stored for the next scene");
-    }, 1800);
+      toast(error instanceof Error ? error.message : "Generation request failed");
+    }
+  };
+
+  const testConnection = async () => {
+    setConnectionBusy(true);
+    try {
+      const response = await fetch("/api/connections/test", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(connection) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail ?? "Connection failed");
+      setConnected(true);
+      setConnectionMode(result.mode === "live" ? "live" : "demo");
+      setShowConnections(false);
+      toast(result.mode === "live" ? "Provider and B2 verified" : "Saved in demo mode · deploy the media worker to go live");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "Connection failed");
+    } finally { setConnectionBusy(false); }
   };
 
   const exportSpec = () => {
@@ -119,8 +155,8 @@ export default function Home() {
         </nav>
         <div className="top-actions">
           <div className="storage-pill"><i /><span><b>2.4 GB</b> of 10 GB</span></div>
-          <button className={connected ? "provider-button connected" : "provider-button"} onClick={() => { setConnected(!connected); toast(connected ? "Provider disconnected" : "GMI Cloud connected for this session"); }}>
-            <span>{connected ? "●" : "+"}</span>{connected ? "GMI Cloud" : "Connect provider"}
+          <button className={connected ? "provider-button connected" : "provider-button"} onClick={() => setShowConnections(true)}>
+            <span>{connected ? "●" : "+"}</span>{connected ? `${connection.provider === "gmicloud" ? "GMI Cloud" : connection.provider}${connectionMode === "demo" ? " · demo" : ""}` : "Connect provider"}
           </button>
           <div className="avatar" aria-label="Profile">LM</div>
         </div>
@@ -236,6 +272,19 @@ export default function Home() {
       </section>
 
       {showJson && <div className="modal-backdrop" onClick={() => setShowJson(false)}><section className="json-modal" onClick={(e) => e.stopPropagation()}><header><div><p>LOCKED SPECIFICATION</p><h2>Continuity JSON</h2></div><button onClick={() => setShowJson(false)}>×</button></header><pre>{JSON.stringify(characterSpec, null, 2)}</pre><footer><span>Schema valid · 8 immutable traits</span><button onClick={exportSpec}>Download JSON</button></footer></section></div>}
+      {showConnections && <div className="modal-backdrop" onClick={() => setShowConnections(false)}><section className="connection-modal" onClick={(e) => e.stopPropagation()}>
+        <header><div><p>BYOK CONNECTION</p><h2>Connect generation & storage</h2><span>Keys are sent only to the server for this run and never written into provenance records.</span></div><button onClick={() => setShowConnections(false)}>×</button></header>
+        <div className="connection-grid">
+          <label><span>Generation provider</span><select value={connection.provider} onChange={(e) => setConnection({ ...connection, provider: e.target.value })}><option value="gmicloud">GMI Cloud</option><option value="openai">OpenAI</option><option value="google">Google</option><option value="runway">Runway</option><option value="luma">Luma</option></select></label>
+          <label><span>Provider API key</span><input type="password" value={connection.provider_api_key} onChange={(e) => setConnection({ ...connection, provider_api_key: e.target.value })} placeholder="••••••••••••••••" /></label>
+          <div className="connection-divider"><span>BACKBLAZE B2</span></div>
+          <label><span>Key ID</span><input type="password" value={connection.b2_key_id} onChange={(e) => setConnection({ ...connection, b2_key_id: e.target.value })} placeholder="B2 application key ID" /></label>
+          <label><span>Application key</span><input type="password" value={connection.b2_app_key} onChange={(e) => setConnection({ ...connection, b2_app_key: e.target.value })} placeholder="B2 application key" /></label>
+          <label><span>Bucket</span><input value={connection.b2_bucket} onChange={(e) => setConnection({ ...connection, b2_bucket: e.target.value })} placeholder="continuity-assets" /></label>
+          <label><span>S3 endpoint</span><input value={connection.b2_endpoint} onChange={(e) => setConnection({ ...connection, b2_endpoint: e.target.value })} /></label>
+        </div>
+        <footer><div><i /> Session-scoped credentials</div><button className="ghost-button" onClick={() => { setConnected(true); setConnectionMode("demo"); setShowConnections(false); toast("Continuing in demo mode"); }}>Use demo</button><button className="render-button" onClick={testConnection} disabled={connectionBusy}>{connectionBusy ? "Testing…" : "Test & connect"}</button></footer>
+      </section></div>}
       {notice && <div className="toast"><span>✓</span>{notice}</div>}
     </main>
   );

@@ -40,3 +40,9 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+
+# python worker
+__pycache__/
+*.py[cod]
+media-worker/.venv/
+media-worker/*.db

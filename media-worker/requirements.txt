@@ -1,0 +1,9 @@
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+pydantic==2.11.7
+cryptography==45.0.6
+boto3==1.40.14
+python-multipart==0.0.20
+genblaze>=0.5.0
+genblaze-gmicloud>=0.3.3
+genblaze-s3>=0.3.0
