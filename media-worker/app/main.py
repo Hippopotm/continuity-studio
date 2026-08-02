@@ -1,5 +1,6 @@
 import os
 import uuid
+import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from .database import create_run, get_run, initialize
@@ -28,15 +29,26 @@ def owner(x_continuity_user: str = Header(default="anonymous")) -> str:
 
 @app.get("/health")
 def health():
-    return {"ok": True, "service": "continuity-media-worker"}
+    return {"ok": True, "service": "continuity-media-worker", "version": "0.2.0"}
 
 
 @app.post("/v1/connections/test", dependencies=[Depends(authorize)])
 def test_connection(connection: ConnectionTest):
     try:
         test_b2(connection)
+        if connection.provider == "openai":
+            response = httpx.get(
+                "https://api.openai.com/v1/models/sora-2",
+                headers={"Authorization": f"Bearer {connection.provider_api_key.get_secret_value()}"},
+                timeout=20,
+            )
+            if response.status_code >= 400:
+                detail = response.json().get("error", {}).get("message", "OpenAI rejected this API key")
+                raise ValueError(detail)
+        elif connection.provider not in {"gmicloud", "openai"}:
+            raise ValueError("Choose GMI Cloud or OpenAI; this provider is not enabled yet")
     except Exception as exc:
-        raise HTTPException(400, f"B2 connection failed: {exc}") from exc
+        raise HTTPException(400, f"Connection failed: {exc}") from exc
     return {"ok": True, "mode": "live", "provider": connection.provider, "bucket": connection.b2_bucket}
 
 

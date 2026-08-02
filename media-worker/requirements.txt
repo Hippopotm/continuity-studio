@@ -4,6 +4,7 @@ pydantic==2.11.7
 cryptography==45.0.6
 boto3==1.40.14
 python-multipart==0.0.20
-genblaze>=0.5.0
-genblaze-gmicloud>=0.3.3
-genblaze-s3>=0.3.0
+genblaze==0.4.5
+genblaze-gmicloud==0.3.5
+genblaze-openai==0.3.4
+genblaze-s3==0.3.6
