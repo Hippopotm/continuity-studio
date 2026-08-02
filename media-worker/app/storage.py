@@ -10,7 +10,8 @@ def b2_client(connection: ConnectionTest):
         endpoint_url=connection.b2_endpoint,
         aws_access_key_id=connection.b2_key_id.get_secret_value(),
         aws_secret_access_key=connection.b2_app_key.get_secret_value(),
-        config=Config(signature_version="s3v4", retries={"max_attempts": 4, "mode": "adaptive"}),
+        config=Config(signature_version="s3v4", connect_timeout=8, read_timeout=12,
+                      retries={"max_attempts": 2, "mode": "standard"}),
     )
 
 

@@ -29,7 +29,7 @@ def owner(x_continuity_user: str = Header(default="anonymous")) -> str:
 
 @app.get("/health")
 def health():
-    return {"ok": True, "service": "continuity-media-worker", "version": "0.3.0"}
+    return {"ok": True, "service": "continuity-media-worker", "version": "0.3.1"}
 
 
 @app.post("/v1/connections/test", dependencies=[Depends(authorize)])
@@ -40,7 +40,7 @@ def test_connection(connection: ConnectionTest):
             response = httpx.get(
                 "https://api.openai.com/v1/models/sora-2",
                 headers={"Authorization": f"Bearer {connection.provider_api_key.get_secret_value()}"},
-                timeout=20,
+                timeout=12,
             )
             if response.status_code >= 400:
                 detail = response.json().get("error", {}).get("message", "OpenAI rejected this API key")
