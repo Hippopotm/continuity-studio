@@ -29,7 +29,7 @@ def owner(x_continuity_user: str = Header(default="anonymous")) -> str:
 
 @app.get("/health")
 def health():
-    return {"ok": True, "service": "continuity-media-worker", "version": "0.3.1"}
+    return {"ok": True, "service": "continuity-media-worker", "version": "0.3.2"}
 
 
 @app.post("/v1/connections/test", dependencies=[Depends(authorize)])
