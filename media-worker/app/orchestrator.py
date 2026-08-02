@@ -2,10 +2,112 @@ import asyncio
 import hashlib
 import json
 import os
-from pathlib import Path
+import time
+import httpx
 from .database import update_run
 from .models import RunRequest
-from .storage import presign_asset
+from .storage import presign_asset, put_asset
+
+
+OPENAI_VIDEO_STATUS_URL = "https://api.openai.com/v1/videos"
+
+
+def build_video_prompt(request: RunRequest) -> str:
+    return (
+        "Generate a realistic cinematic video shot from this locked continuity JSON. "
+        "Preserve character identity, wardrobe, environment, voice/audio cues, camera, "
+        "screen direction, and motion exactly. Avoid animation, illustration, stylized "
+        "flat art, identity drift, face changes, wardrobe changes, or impossible motion.\n\n"
+        f"{json.dumps(request.specification, sort_keys=True, indent=2)}"
+    )
+
+
+def select_duration(request: RunRequest) -> int:
+    shot_duration = request.specification.get("shot", {}).get("duration", 4)
+    return min((4, 8, 12), key=lambda value: abs(value - int(shot_duration)))
+
+
+async def generate_openai_video(run_id: str, request: RunRequest, spec_hash: str) -> None:
+    if not request.connection:
+        raise ValueError("A live OpenAI run requires provider and B2 credentials")
+
+    provider_key = request.connection.provider_api_key.get_secret_value()
+    headers = {"Authorization": f"Bearer {provider_key}"}
+    payload = {
+        "model": "sora-2",
+        "prompt": build_video_prompt(request),
+        "seconds": str(select_duration(request)),
+        "size": "1280x720",
+    }
+    if request.reference_urls:
+        payload["input_reference"] = {"image_url": request.reference_urls[0]}
+    elif request.previous_clean_frame_url:
+        payload["input_reference"] = {"image_url": request.previous_clean_frame_url}
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30, read=60)) as client:
+        files = {key: (None, value if isinstance(value, str) else json.dumps(value)) for key, value in payload.items()}
+        create_response = await client.post(OPENAI_VIDEO_STATUS_URL, headers=headers, files=files)
+        if create_response.status_code >= 400:
+            raise ValueError(openai_error(create_response, "OpenAI could not start the video job"))
+
+        video = create_response.json()
+        video_id = video.get("id")
+        if not video_id:
+            raise ValueError("OpenAI did not return a video job id")
+
+        deadline = time.monotonic() + 12 * 60
+        while time.monotonic() < deadline:
+            status_response = await client.get(f"{OPENAI_VIDEO_STATUS_URL}/{video_id}", headers=headers)
+            if status_response.status_code >= 400:
+                raise ValueError(openai_error(status_response, "OpenAI video status check failed"))
+            video = status_response.json()
+            status = video.get("status")
+            if status == "completed":
+                break
+            if status == "failed":
+                error = video.get("error") or {}
+                raise ValueError(error.get("message") or "OpenAI video generation failed")
+            await asyncio.sleep(8)
+        else:
+            raise ValueError("OpenAI video generation is still running after 12 minutes")
+
+        content_response = await client.get(
+            f"{OPENAI_VIDEO_STATUS_URL}/{video_id}/content",
+            headers=headers,
+            params={"variant": "video"},
+        )
+        if content_response.status_code >= 400:
+            raise ValueError(openai_error(content_response, "OpenAI video download failed"))
+        video_bytes = content_response.content
+        if len(video_bytes) < 1024:
+            raise ValueError("OpenAI returned an empty video file")
+
+    key = f"continuity/{request.project_id}/{request.shot_id}/{run_id}.mp4"
+    stored_url = put_asset(request.connection, key, video_bytes, "video/mp4")
+    browser_url = presign_asset(request.connection, stored_url)
+    update_run(run_id, "complete", {
+        "mode": "live",
+        "provider": "openai",
+        "provider_video_id": video_id,
+        "spec_hash": spec_hash,
+        "continuity_score": None,
+        "assets": [{
+            "url": browser_url,
+            "storage_url": stored_url,
+            "sha256": hashlib.sha256(video_bytes).hexdigest(),
+            "media_type": "video/mp4",
+            "bytes": len(video_bytes),
+        }],
+    })
+
+
+def openai_error(response: httpx.Response, fallback: str) -> str:
+    try:
+        body = response.json()
+    except Exception:
+        return f"{fallback} ({response.status_code})"
+    detail = body.get("error", {}).get("message") or body.get("message") or body.get("detail")
+    return f"{detail or fallback} ({response.status_code})"
 
 
 async def execute_run(run_id: str, request: RunRequest) -> None:
@@ -32,6 +134,10 @@ async def execute_run(run_id: str, request: RunRequest) -> None:
         if not request.connection:
             raise ValueError("A live run requires session-scoped provider and B2 credentials")
 
+        if request.connection.provider == "openai":
+            await generate_openai_video(run_id, request, spec_hash)
+            return
+
         # Genblaze packages deliberately load only for live runs. Provider class
         # names can vary across plugin releases; keep this adapter version-pinned.
         from genblaze_core import Pipeline, Modality, ObjectStorageSink, KeyStrategy
@@ -54,19 +160,14 @@ async def execute_run(run_id: str, request: RunRequest) -> None:
         if provider_name == "gmicloud":
             provider = GMICloudVideoProvider(api_key=provider_key)
             model = request.model
-        elif provider_name == "openai":
-            from genblaze_openai import SoraProvider
-            provider = SoraProvider(api_key=provider_key)
-            model = "sora-2"
         else:
             raise ValueError(
                 f"{provider_name} video generation is not enabled yet; use GMI Cloud or OpenAI"
             )
-        prompt = canonical
+        prompt = build_video_prompt(request)
         update_run(run_id, "generating")
 
-        shot_duration = request.specification.get("shot", {}).get("duration", 4)
-        supported_duration = min((4, 8, 12), key=lambda value: abs(value - int(shot_duration)))
+        supported_duration = select_duration(request)
 
         def run_pipeline():
             return (Pipeline(f"continuity-{request.project_id}-{request.shot_id}")
@@ -82,9 +183,15 @@ async def execute_run(run_id: str, request: RunRequest) -> None:
             "sha256": a.sha256,
             "media_type": a.media_type,
         } for s in result.run.steps for a in s.assets]
+        video_assets = [
+            asset for asset in assets
+            if asset.get("media_type", "").startswith("video") or asset.get("url", "").lower().split("?")[0].endswith(".mp4")
+        ]
+        if not video_assets:
+            raise ValueError("Provider finished but did not return a playable video asset")
         update_run(run_id, "complete", {
             "mode": "live", "spec_hash": spec_hash, "continuity_score": None,
-            "assets": assets, "manifest_hash": result.manifest.canonical_hash,
+            "assets": video_assets, "manifest_hash": result.manifest.canonical_hash,
         })
     except Exception as exc:
         update_run(run_id, "failed", error=str(exc))

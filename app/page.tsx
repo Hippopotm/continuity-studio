@@ -7,6 +7,7 @@ type Connection = {
   b2_app_key: string; b2_bucket: string; b2_endpoint: string;
 };
 type RunState = { id?: string; status: string; error?: string | null; result?: { assets?: { url: string; media_type?: string }[] } | null };
+type RunUpdate = RunState & { detail?: string };
 
 const shots = [
   { id: 1, title: "Arrival", duration: 4, score: 96, copy: "Mara waits under the iron canopy as rain crosses the platform." },
@@ -34,6 +35,13 @@ async function readJson(response: Response) {
   try { return JSON.parse(text); } catch { return { detail: text || `Request failed (${response.status})` }; }
 }
 
+function findVideoUrl(update: RunUpdate) {
+  return update.result?.assets?.find((asset) => {
+    const mediaType = asset.media_type || "";
+    return mediaType.startsWith("video") || asset.url.toLowerCase().split("?")[0].endsWith(".mp4");
+  })?.url;
+}
+
 export default function Home() {
   const [activeShot, setActiveShot] = useState(2);
   const [brief, setBrief] = useState("Mara waits alone on a 1930s railway platform at night. Fine rain catches the warm station lamps. She realizes the train is stopping for her.");
@@ -45,7 +53,7 @@ export default function Home() {
   const [run, setRun] = useState<RunState>({ status: "idle" });
   const [notice, setNotice] = useState("");
   const current = shots.find((shot) => shot.id === activeShot)!;
-  const generatedVideo = run.result?.assets?.find((asset) => (asset.media_type || "").startsWith("video") || asset.url.includes(".mp4"))?.url;
+  const generatedVideo = findVideoUrl(run);
   const isWorking = ["queued", "compiling", "generating"].includes(run.status);
   const cost = useMemo(() => connection.provider === "openai" ? (current.duration * 0.1).toFixed(2) : "0.73", [connection.provider, current.duration]);
 
@@ -86,7 +94,12 @@ export default function Home() {
         const update = await readJson(poll);
         if (!poll.ok) throw new Error(update.detail || "Could not read generation status");
         setRun(update);
-        if (update.status === "complete") { flash("Your video is ready and stored in B2"); return; }
+        if (update.status === "complete") {
+          const videoUrl = findVideoUrl(update);
+          if (!videoUrl) throw new Error("The provider finished, but no playable video was returned. Please try again.");
+          flash("Your video is ready and stored in B2");
+          return;
+        }
         if (update.status === "failed") throw new Error(update.error || "The provider could not generate this shot");
       }
       throw new Error("Generation is taking longer than expected. The run remains available in Runs.");
@@ -139,7 +152,7 @@ export default function Home() {
             <div className="canvas-heading"><div><div className="section-kicker"><span>03</span> SHOT CANVAS</div><p>{shots.length} shots · 12 seconds · 16:9</p></div><button>＋ Add shot</button></div>
             <div className="cinema-stage">
               <div className="stage-topline"><span>SHOT {String(activeShot).padStart(2, "0")}</span><span>50MM&nbsp;&nbsp; • &nbsp;&nbsp;24 FPS&nbsp;&nbsp; • &nbsp;&nbsp;1280 × 720</span></div>
-              {generatedVideo ? <video className="result-video" src={generatedVideo} controls autoPlay playsInline /> : <div className="hero-frame" />}
+              {generatedVideo ? <video className="result-video" src={generatedVideo} controls autoPlay playsInline onError={() => { const message = "The generated video URL could not be played. Please generate again to refresh the B2 playback link."; setRun((value) => ({ ...value, status: "failed", error: message })); flash(message); }} /> : <div className="hero-frame" />}
               {!generatedVideo && <button className="stage-play" onClick={generate}>{isWorking ? <i className="spinner" /> : "▶"}</button>}
               {isWorking && <div className="progress-card"><div className="progress-icon"><i className="spinner" /></div><div><b>{run.status === "generating" ? "Generating with your provider" : "Preparing continuity package"}</b><small>Keep this tab open. Video jobs can take several minutes.</small></div><span>LIVE</span></div>}
               {run.status === "failed" && <div className="error-card"><b>Generation stopped</b><span>{run.error}</span><button onClick={generate}>Try again</button></div>}

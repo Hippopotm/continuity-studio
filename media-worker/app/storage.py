@@ -19,6 +19,18 @@ def test_b2(connection: ConnectionTest) -> None:
     b2_client(connection).head_bucket(Bucket=connection.b2_bucket)
 
 
+def put_asset(connection: ConnectionTest, key: str, body: bytes, content_type: str) -> str:
+    """Upload bytes to B2 and return the S3-style URL that Genblaze also emits."""
+    b2_client(connection).put_object(
+        Bucket=connection.b2_bucket,
+        Key=key,
+        Body=body,
+        ContentType=content_type,
+    )
+    endpoint = connection.b2_endpoint.rstrip("/")
+    return f"{endpoint}/{connection.b2_bucket}/{key}"
+
+
 def presign_asset(connection: ConnectionTest, url: str) -> str:
     """Return a short-lived browser URL for a Genblaze asset stored in B2."""
     parsed = urlparse(url)
