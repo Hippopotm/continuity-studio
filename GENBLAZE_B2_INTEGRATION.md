@@ -1,8 +1,9 @@
 # Genblaze + Backblaze B2 integration handoff
 
-The deployed prototype deliberately runs without paid API calls. Its `Generate`
-interaction is a deterministic demo of the job lifecycle. A production worker
-should remain a separate Python service because Genblaze is Python-first.
+The deployed app uses a separate Python media worker because Genblaze is
+Python-first and video jobs should not run inside the web request runtime. The
+worker validates BYOK credentials, starts provider jobs, persists outputs to
+Backblaze B2, and returns playable presigned URLs.
 
 ## Worker contract
 
@@ -20,21 +21,22 @@ Content-Type: application/json
   "model": "Kling-Image2Video-V2.1-Master",
   "specification": {},
   "reference_urls": [],
-  "previous_clean_frame_url": "b2://.../clean-end.png",
+  "previous_clean_frame_url": "https://.../clean-end.png",
   "budget_usd": 0.75
 }
 ```
 
-Progress is streamed as `queued`, `compiling`, `generating`, `evaluating`,
-`persisting`, and `complete`. The complete event returns asset URLs, hashes,
-continuity scores, actual cost, and the manifest URL.
+Progress is polled as `queued`, `compiling`, `generating`, `complete`, or
+`failed`. A run is marked `complete` only when the worker has a playable
+`video/mp4` asset URL. The complete event returns asset URLs, hashes,
+continuity scores, provider metadata, and future manifest references.
 
 ## Recommended Genblaze shape
 
 Install only the provider packages used by the deployment:
 
 ```bash
-pip install genblaze genblaze-gmicloud genblaze-s3
+pip install genblaze genblaze-gmicloud genblaze-openai genblaze-s3
 ```
 
 Create an `ObjectStorageSink` with
@@ -42,6 +44,12 @@ Create an `ObjectStorageSink` with
 image-to-video provider with the approved character reference and optional clean
 ending frame, then persist the generated clip, extracted clean frame, evaluation
 JSON, thumbnail, logs, and Genblaze manifest through that sink.
+
+The current worker uses this Genblaze pipeline for GMI Cloud Kling. OpenAI Sora
+generation uses the OpenAI Videos API directly, downloads the resulting MP4,
+then stores it in the same Backblaze B2 bucket. This direct path avoids blocking
+the product on provider adapter drift while keeping Genblaze as the
+orchestration layer for supported provider workflows.
 
 The worker must keep BYOK values in memory or encrypted server-side storage.
 Never include credentials in prompts, logs, events, B2 object metadata, or
@@ -75,6 +83,7 @@ B2_KEY_ID=
 B2_APP_KEY=
 B2_BUCKET=
 GMI_CLOUD_API_KEY=
+OPENAI_API_KEY=
 SESSION_ENCRYPTION_KEY=
 ```
 
