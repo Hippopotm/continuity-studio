@@ -5,10 +5,10 @@ import { ChangeEvent, useEffect, useMemo, useState } from "react";
 type Connection = { provider: "openai"; provider_api_key: string; openai_project_id: string; openai_organization_id: string };
 type Asset = { url: string; storage_url?: string; media_type?: string; role?: string; bytes?: number };
 type RunState = { id?: string; status: string; error?: string | null; result?: { assets?: Asset[] } | null };
-type Generation = { id: string; createdAt: string; videoUrl: string; finalFrameUrl?: string; label: string };
+type Generation = { id: string; createdAt: string; videoUrl: string; finalFrameUrl?: string; storageVideoUrl?: string; storageFinalFrameUrl?: string; label: string };
 type Shot = { id: number; title: string; duration: number; brief: string; generations: Generation[]; selectedGenerationId?: string };
 type CharacterReferences = { front?: string; threeQuarter?: string; profile?: string; body?: string; characteristics?: string };
-type Project = { id: string; title: string; characterName: string; characterDescription: string; characterKeywords: string; characterReferences: CharacterReferences; shots: Shot[]; finalVideoUrl?: string };
+type Project = { id: string; title: string; characterName: string; characterDescription: string; characterKeywords: string; characterReferences: CharacterReferences; shots: Shot[]; finalVideoUrl?: string; finalVideoStorageUrl?: string };
 
 const STORAGE_KEY = "continuity-projects-v3";
 const tutorial = [
@@ -145,6 +145,12 @@ export default function Home() {
   const saveProject = (updated: Project) => setProjects((items) => items.map((item) => item.id === updated.id ? updated : item));
   const updateShot = (patch: Partial<Shot>) => saveProject({ ...project, shots: project.shots.map((shot) => shot.id === current.id ? { ...shot, ...patch } : shot) });
 
+  useEffect(() => {
+    if (selectedGeneration?.id?.startsWith("run_")) {
+      refreshGeneration(selectedGeneration.id).catch(() => undefined);
+    }
+  }, [selectedGeneration?.id, projectId, activeShotId]);
+
   function createProject() { const created = newProject(newProjectTitle.trim()); setProjects((items) => [created, ...items]); setProjectId(created.id); setActiveShotId(1); setRun({ status: "idle" }); setShowProjectModal(false); setNewProjectTitle(""); flash("Blank project created"); }
   function discardProject() { if (projects.length <= 1) { const created = newProject(); setProjects([created]); setProjectId(created.id); setActiveShotId(1); flash("Project cleared"); return; } const filtered = projects.filter((item) => item.id !== project.id); setProjects(filtered); setProjectId(filtered[0].id); setActiveShotId(filtered[0].shots[0]?.id || 1); flash("Project discarded"); }
   function addShot() { const nextId = Math.max(0, ...project.shots.map((shot) => shot.id)) + 1; saveProject({ ...project, shots: [...project.shots, blankShot(nextId)] }); setActiveShotId(nextId); setRun({ status: "idle" }); }
@@ -153,6 +159,34 @@ export default function Home() {
   function discardGeneration(generationId: string) { const generations = current.generations.filter((item) => item.id !== generationId); saveProject({ ...project, shots: project.shots.map((shot) => shot.id === current.id ? { ...shot, generations, selectedGenerationId: generations[0]?.id } : shot) }); flash("Take discarded"); }
   function connect() { setShowConnection(false); setConnected(true); flash("OpenAI connected. B2 storage is managed by Continuity."); }
   function uploadRef(key: keyof CharacterReferences, event: ChangeEvent<HTMLInputElement>) { const file = event.target.files?.[0]; if (!file) return; const reader = new FileReader(); reader.onload = () => saveProject({ ...project, characterReferences: { ...project.characterReferences, [key]: String(reader.result) } }); reader.readAsDataURL(file); }
+
+  async function refreshGeneration(generationId: string): Promise<Generation | undefined> {
+    const response = await fetch(`/api/runs/${encodeURIComponent(generationId)}`, { cache: "no-store" });
+    const update = await readJson(response) as RunState & { detail?: string };
+    if (!response.ok || update.status !== "complete") return undefined;
+    const video = videoAsset(update);
+    if (!video?.url) return undefined;
+    const frame = frameAsset(update);
+    let refreshed: Generation | undefined;
+    setProjects((items) => items.map((item) => item.id !== project.id ? item : {
+      ...item,
+      shots: item.shots.map((shot) => ({
+        ...shot,
+        generations: shot.generations.map((generation) => {
+          if (generation.id !== generationId) return generation;
+          refreshed = {
+            ...generation,
+            videoUrl: video.url,
+            finalFrameUrl: frame?.url || generation.finalFrameUrl,
+            storageVideoUrl: video.storage_url || generation.storageVideoUrl,
+            storageFinalFrameUrl: frame?.storage_url || generation.storageFinalFrameUrl,
+          };
+          return refreshed;
+        }),
+      })),
+    }));
+    return refreshed;
+  }
 
   async function ensureCharacterVisuals(baseProject = project) {
     const missing = referenceRoles.filter((key) => !baseProject.characterReferences[key]);
@@ -194,21 +228,24 @@ export default function Home() {
     if (!current.brief.trim()) { flash("Write this shot brief first"); return; }
     setRun({ status: "queued" });
     try {
+      const refreshedPrevious = previousSelected?.id?.startsWith("run_") ? await refreshGeneration(previousSelected.id) || previousSelected : previousSelected;
+      const handoffFrameUrl = refreshedPrevious?.finalFrameUrl || null;
       const visualProject = await ensureCharacterVisuals(project);
-      const visualReferences = previousSelected?.finalFrameUrl ? [] : referenceRoles.map((key) => visualProject.characterReferences[key]).filter((value): value is string => Boolean(value) && !value.startsWith("data:"));
+      const visualReferences = handoffFrameUrl ? [] : referenceRoles.map((key) => visualProject.characterReferences[key]).filter((value): value is string => Boolean(value) && !value.startsWith("data:"));
       const shotSpec = {
         ...continuityJson,
         character: {
           ...continuityJson.character,
           references: Object.fromEntries(referenceRoles.map((key) => [key, { url: visualProject.characterReferences[key] || null, available: Boolean(visualProject.characterReferences[key]), role: refLabel(key) }])),
         },
+        multi_shot_handoff: { previous_final_frame_url: handoffFrameUrl, instruction: handoffFrameUrl ? "Use previous selected shot final frame as the first-frame reference and preserve identity, pose direction, wardrobe, lighting, and camera continuity." : "No previous shot reference yet." },
         prompt_locking_rules: {
           fixed_keyword_order: "Repeat locked_keywords_in_order exactly and in order in every shot prompt.",
           identity_reference_priority: "Use uploaded character references first, then generated references, then previous final frame.",
           shot_specificity: "Only use this shot brief for this shot. Do not inherit scene text from other shots.",
         },
       };
-      const response = await fetch("/api/runs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project_id: project.id, shot_id: `shot-${current.id}`, provider: "openai", model: "sora-2", specification: shotSpec, reference_urls: visualReferences, previous_clean_frame_url: previousSelected?.finalFrameUrl || null, budget_usd: Math.max(Number(cost), 0.1), connection }) });
+      const response = await fetch("/api/runs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project_id: project.id, shot_id: `shot-${current.id}`, provider: "openai", model: "sora-2", specification: shotSpec, reference_urls: visualReferences, previous_clean_frame_url: handoffFrameUrl, budget_usd: Math.max(Number(cost), 0.1), connection }) });
       const created = await readJson(response); if (!response.ok) throw new Error(created.detail || "Could not start generation");
       setRun({ id: created.id, status: created.status });
       for (let attempt = 0; attempt < 240; attempt += 1) {
@@ -219,8 +256,8 @@ export default function Home() {
         if (update.status === "complete") {
           const video = videoAsset(update); if (!video) throw new Error("The provider finished, but no playable video was returned.");
           const frame = frameAsset(update);
-          const generation: Generation = { id: created.id, createdAt: new Date().toLocaleString(), videoUrl: video.url, finalFrameUrl: frame?.url, label: `Take ${current.generations.length + 1}` };
-          saveProject({ ...project, shots: project.shots.map((shot) => shot.id === current.id ? { ...shot, generations: [generation, ...shot.generations], selectedGenerationId: generation.id } : shot) });
+          const generation: Generation = { id: created.id, createdAt: new Date().toLocaleString(), videoUrl: video.url, finalFrameUrl: frame?.url, storageVideoUrl: video.storage_url, storageFinalFrameUrl: frame?.storage_url, label: `Take ${current.generations.length + 1}` };
+          saveProject({ ...visualProject, shots: visualProject.shots.map((shot) => shot.id === current.id ? { ...shot, generations: [generation, ...shot.generations], selectedGenerationId: generation.id } : shot) });
           flash("Shot ready and stored in B2"); return;
         }
         if (update.status === "failed") throw new Error(update.error || "The provider could not generate this shot");
@@ -228,7 +265,7 @@ export default function Home() {
       throw new Error("Generation is taking longer than expected.");
     } catch (error) { const message = error instanceof Error ? error.message : "Generation failed"; setRun((value) => ({ ...value, status: "failed", error: message })); flash(message); }
   }
-  async function assembleFilm() { if (selectedClips.length < 2) { flash("Generate and select at least two shots first"); return; } setRun({ status: "generating" }); try { const response = await fetch("/api/assemble", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project_id: project.id, title: displayTitle(project.title), assets: selectedClips.map((clip) => clip.videoUrl), connection }) }); const body = await readJson(response); if (!response.ok) throw new Error(body.detail || "Could not assemble final video"); saveProject({ ...project, finalVideoUrl: body.asset.url }); setRun({ status: "idle" }); flash("Final video assembled and stored in B2"); } catch (error) { const message = error instanceof Error ? error.message : "Assembly failed"; setRun({ status: "failed", error: message }); flash(message); } }
+  async function assembleFilm() { if (selectedClips.length < 2) { flash("Generate and select at least two shots first"); return; } setRun({ status: "generating" }); try { const freshClips = await Promise.all(selectedClips.map(async (clip) => clip.id.startsWith("run_") ? await refreshGeneration(clip.id) || clip : clip)); const response = await fetch("/api/assemble", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project_id: project.id, title: displayTitle(project.title), assets: freshClips.map((clip) => clip.videoUrl), connection }) }); const body = await readJson(response); if (!response.ok) throw new Error(body.detail || "Could not assemble final video"); saveProject({ ...project, finalVideoUrl: body.asset.url, finalVideoStorageUrl: body.asset.storage_url }); setRun({ status: "idle" }); flash("Final video assembled and stored in B2"); } catch (error) { const message = error instanceof Error ? error.message : "Assembly failed"; setRun({ status: "failed", error: message }); flash(message); } }
 
   return <main className="studio-shell">
     <aside className="rail"><div className="logo">C</div><button className="rail-button active"><span>✦</span><small>Create</small></button><button className="rail-button" onClick={() => setShowTutorial(true)}><span>?</span><small>Guide</small></button><div className="rail-spacer" /><button className="rail-button" onClick={() => setShowConnection(true)}><span>⚙</span><small>Setup</small></button><div className="avatar">LM</div></aside>
@@ -244,7 +281,7 @@ export default function Home() {
           <p className="identity-note">Missing images are generated only once. Uploaded images are kept, stored to B2, and used as references.</p>
           <div className="reference-grid expanded">{referenceRoles.map((key) => <label key={key} className="reference-upload"><input type="file" accept="image/*" onChange={(e) => uploadRef(key, e)} />{project.characterReferences[key] ? <img src={project.characterReferences[key]} alt={refLabel(key)} /> : <span>＋<small>{refLabel(key)}</small></span>}</label>)}</div>
         </aside>
-        <section className="canvas-column"><div className="canvas-heading"><div><div className="section-kicker"><span>03</span> SHOT CANVAS</div><p>{selectedClips.length}/{project.shots.length} shots selected · final preview always visible</p></div><button onClick={addShot}>＋ Add shot</button></div><div className="cinema-stage"><div className="stage-topline"><span>SHOT {String(current.id).padStart(2, "0")}</span><span>50MM · 24 FPS · 1280 × 720</span></div>{generatedVideo ? <video className="result-video" src={generatedVideo} controls playsInline poster={selectedGeneration?.finalFrameUrl} /> : <div className="empty-canvas"><b>No shot video yet</b><span>Write this shot brief, add identity references if needed, then click Generate shot.</span></div>}{isWorking && <div className="progress-card"><div className="progress-icon"><i className="spinner" /></div><div><b>{run.status === "generating" ? "Generating media" : "Preparing continuity package"}</b><small>Keep this tab open. Video jobs can take several minutes.</small></div><span>LIVE</span></div>}{run.status === "failed" && <div className="error-card"><b>Generation stopped</b><span>{run.error}</span><button onClick={generate}>Try again</button></div>}</div><div className="timeline-new">{project.shots.map((shot) => { const selected = shot.generations.find((item) => item.id === shot.selectedGenerationId) || shot.generations[0]; return <button key={shot.id} onClick={() => { setActiveShotId(shot.id); setRun({ status: "idle" }); }} className={activeShotId === shot.id ? "timeline-card selected" : "timeline-card"}><div className="timeline-image">{selected?.finalFrameUrl ? <img src={selected.finalFrameUrl} alt="selected final frame" /> : <span>{String(shot.id).padStart(2, "0")}</span>}<small>{shot.duration}s</small></div><div><b>{shotTitle(shot)}</b><p>{shot.brief || "Blank shot"}</p><small><i /> {shot.generations.length} saved takes</small></div></button>; })}<button className="new-shot" onClick={addShot}>＋<span>New shot</span></button></div></section>
+        <section className="canvas-column"><div className="canvas-heading"><div><div className="section-kicker"><span>03</span> SHOT CANVAS</div><p>{selectedClips.length}/{project.shots.length} shots selected · final preview always visible</p></div><button onClick={addShot}>＋ Add shot</button></div><div className="cinema-stage"><div className="stage-topline"><span>SHOT {String(current.id).padStart(2, "0")}</span><span>50MM · 24 FPS · 1280 × 720</span></div>{generatedVideo ? <video className="result-video" src={generatedVideo} controls playsInline poster={selectedGeneration?.finalFrameUrl} onError={() => selectedGeneration?.id && refreshGeneration(selectedGeneration.id).catch(() => flash("Could not refresh this B2 video link"))} /> : <div className="empty-canvas"><b>No shot video yet</b><span>Write this shot brief, add identity references if needed, then click Generate shot.</span></div>}{isWorking && <div className="progress-card"><div className="progress-icon"><i className="spinner" /></div><div><b>{run.status === "generating" ? "Generating media" : "Preparing continuity package"}</b><small>Keep this tab open. Video jobs can take several minutes.</small></div><span>LIVE</span></div>}{run.status === "failed" && <div className="error-card"><b>Generation stopped</b><span>{run.error}</span><button onClick={generate}>Try again</button></div>}</div><div className="timeline-new">{project.shots.map((shot) => { const selected = shot.generations.find((item) => item.id === shot.selectedGenerationId) || shot.generations[0]; return <button key={shot.id} onClick={() => { setActiveShotId(shot.id); setRun({ status: "idle" }); }} className={activeShotId === shot.id ? "timeline-card selected" : "timeline-card"}><div className="timeline-image">{selected?.finalFrameUrl ? <img src={selected.finalFrameUrl} alt="selected final frame" /> : <span>{String(shot.id).padStart(2, "0")}</span>}<small>{shot.duration}s</small></div><div><b>{shotTitle(shot)}</b><p>{shot.brief || "Blank shot"}</p><small><i /> {shot.generations.length} saved takes</small></div></button>; })}<button className="new-shot" onClick={addShot}>＋<span>New shot</span></button></div></section>
         <aside className="control-panel glass-panel"><div className="shot-heading"><span>SHOT {String(current.id).padStart(2, "0")}</span><input className="shot-title-input" value={current.title} onChange={(e) => updateShot({ title: e.target.value })} placeholder="Rename shot" /><p>{current.brief || "This shot is blank."}</p><button className="danger-link" onClick={() => discardShot()}>Discard shot</button></div><div className="control-block"><label>Generation history</label>{current.generations.length ? current.generations.map((generation) => <div key={generation.id} className={generation.id === selectedGeneration?.id ? "take-row active" : "take-row"}><button onClick={() => selectGeneration(generation.id)}><span>{generation.label}</span><small>{generation.createdAt}</small></button><button className="mini-danger" onClick={() => discardGeneration(generation.id)}>×</button></div>) : <p className="empty-note">No takes yet. Generate this shot to save versions here.</p>}</div><div className="control-block"><label>Multi-shot handoff</label><div className="anchor-row"><div className="frame-icon">⌗</div><div><b>Previous final frame</b><small>{previousSelected?.finalFrameUrl ? "Will anchor this shot" : "Generate previous shot first"}</small></div><span className="status-dot">{previousSelected?.finalFrameUrl ? "ON" : "WAIT"}</span></div></div><div data-guide="film" className="control-block"><label>Final film preview</label><div className="film-strip">{project.shots.map((shot) => <button key={shot.id} onClick={() => setActiveShotId(shot.id)} className={shot.generations.length ? "film-cell ready" : "film-cell"}>{String(shot.id).padStart(2, "0")}</button>)}</div><button className="generate-cta" onClick={assembleFilm} disabled={isWorking || selectedClips.length < 2}>Join selected shots</button>{project.finalVideoUrl && <video className="mini-final" src={project.finalVideoUrl} controls playsInline />}</div>{hasForecast && <div className="score-card"><div><span>CONTINUITY FORECAST</span><strong>92<small>%</small></strong></div>{[["Identity", hasIdentity ? 94 : 0], ["Brief", current.brief ? 92 : 0], ["References", Object.values(project.characterReferences).some(Boolean) ? 96 : 70], ["Handoff", previousSelected?.finalFrameUrl ? 98 : 72]].map(([label, score]) => <div className="score-line" key={label}><span>{label}</span><i><em style={{ width: `${score}%` }} /></i><b>{score}%</b></div>)}</div>}<button className="generate-cta" onClick={generate} disabled={isWorking}>{isWorking ? "Generation in progress..." : `Generate shot · $${cost}`}</button><p className="b2-note">Cloud storage is managed by Continuity with Backblaze B2</p></aside>
       </div>
     </section>

@@ -13,7 +13,7 @@ from .models import AssembleRequest, CharacterVisualRequest, ConnectionTest, Run
 from .orchestrator import execute_run, openai_error
 from .storage import presign_asset, put_asset, resolve_b2_connection, test_b2
 
-app = FastAPI(title="Continuity Media Worker", version="0.5.0")
+app = FastAPI(title="Continuity Media Worker", version="0.6.0")
 app.add_middleware(CORSMiddleware, allow_origins=[], allow_methods=["GET", "POST"], allow_headers=["*"])
 
 
@@ -43,7 +43,27 @@ def openai_test_headers(connection: ConnectionTest) -> dict[str, str]:
 
 @app.get("/health")
 def health():
-    return {"ok": True, "service": "continuity-media-worker", "version": "0.5.0"}
+    return {"ok": True, "service": "continuity-media-worker", "version": "0.6.0"}
+
+
+def refresh_result_asset_urls(result: dict | None, connection: ConnectionTest | None = None) -> dict | None:
+    if not result:
+        return result
+    try:
+        if not connection:
+            connection = ConnectionTest(provider="openai", provider_api_key="server-managed")
+        connection = resolve_b2_connection(connection)
+        assets = result.get("assets") or []
+        refreshed_assets = []
+        for asset in assets:
+            item = dict(asset)
+            storage_url = item.get("storage_url")
+            if storage_url:
+                item["url"] = presign_asset(connection, storage_url)
+            refreshed_assets.append(item)
+        return {**result, "assets": refreshed_assets}
+    except Exception:
+        return result
 
 
 @app.post("/v1/connections/test", dependencies=[Depends(authorize)])
@@ -226,4 +246,11 @@ def read_run(run_id: str, current_owner: str = Depends(owner)):
     run = get_run(run_id, current_owner)
     if not run:
         raise HTTPException(404, "Run not found")
+    try:
+        request_data = run.pop("request", None) or {}
+        connection_data = request_data.get("connection")
+        connection = ConnectionTest(**connection_data) if connection_data else None
+        run["result"] = refresh_result_asset_urls(run.get("result"), connection)
+    except Exception:
+        pass
     return run

@@ -67,6 +67,8 @@ async def prepare_video_reference(client: httpx.AsyncClient, request: RunRequest
     source_url = request.previous_clean_frame_url or (request.reference_urls[0] if request.reference_urls else None)
     if not source_url:
         return None
+    if request.connection:
+        source_url = presign_asset(request.connection, source_url)
     response = await client.get(source_url, follow_redirects=True)
     if response.status_code >= 400 or len(response.content) < 256:
         raise ValueError(f"Could not download continuity reference image ({response.status_code})")

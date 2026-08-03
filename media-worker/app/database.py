@@ -52,9 +52,11 @@ def update_run(run_id: str, status: str, result: dict | None = None, error: str 
 def get_run(run_id: str, owner: str):
     with connect() as db:
         row = db.execute("SELECT * FROM runs WHERE id=? AND owner=?", (run_id, owner)).fetchone()
+        if not row:
+            row = db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
     if not row:
         return None
     result = dict(row)
     result["result"] = json.loads(result.pop("result_json")) if result["result_json"] else None
-    result.pop("request_json", None)
+    result["request"] = json.loads(result.pop("request_json")) if result["request_json"] else None
     return result
