@@ -7,10 +7,10 @@ class ConnectionTest(BaseModel):
     provider_api_key: SecretStr
     openai_project_id: str | None = None
     openai_organization_id: str | None = None
-    b2_key_id: SecretStr
-    b2_app_key: SecretStr
-    b2_bucket: str
-    b2_endpoint: str
+    b2_key_id: SecretStr | None = None
+    b2_app_key: SecretStr | None = None
+    b2_bucket: str | None = None
+    b2_endpoint: str | None = None
 
 
 class RunRequest(BaseModel):
@@ -30,3 +30,10 @@ class RunCreated(BaseModel):
     status: Literal["queued", "demo"]
     estimated_cost_usd: float
     mode: Literal["live", "demo"]
+
+
+class AssembleRequest(BaseModel):
+    project_id: str
+    title: str = "Continuity film"
+    assets: list[str] = Field(min_length=1)
+    connection: ConnectionTest | None = None

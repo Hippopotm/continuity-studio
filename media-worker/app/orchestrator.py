@@ -2,11 +2,13 @@ import asyncio
 import hashlib
 import json
 import os
+import subprocess
+import tempfile
 import time
 import httpx
 from .database import update_run
 from .models import RunRequest
-from .storage import presign_asset, put_asset
+from .storage import presign_asset, put_asset, resolve_b2_connection
 
 
 OPENAI_VIDEO_STATUS_URL = "https://api.openai.com/v1/videos"
@@ -95,6 +97,13 @@ async def generate_openai_video(run_id: str, request: RunRequest, spec_hash: str
     key = f"continuity/{request.project_id}/{request.shot_id}/{run_id}.mp4"
     stored_url = put_asset(request.connection, key, video_bytes, "video/mp4")
     browser_url = presign_asset(request.connection, stored_url)
+    final_frame = extract_final_frame(video_bytes)
+    final_frame_url = None
+    final_frame_browser_url = None
+    if final_frame:
+        frame_key = f"continuity/{request.project_id}/{request.shot_id}/{run_id}-final-frame.jpg"
+        final_frame_url = put_asset(request.connection, frame_key, final_frame, "image/jpeg")
+        final_frame_browser_url = presign_asset(request.connection, final_frame_url)
     update_run(run_id, "complete", {
         "mode": "live",
         "provider": "openai",
@@ -107,8 +116,32 @@ async def generate_openai_video(run_id: str, request: RunRequest, spec_hash: str
             "sha256": hashlib.sha256(video_bytes).hexdigest(),
             "media_type": "video/mp4",
             "bytes": len(video_bytes),
-        }],
+        }, *([{
+            "url": final_frame_browser_url,
+            "storage_url": final_frame_url,
+            "sha256": hashlib.sha256(final_frame).hexdigest(),
+            "media_type": "image/jpeg",
+            "role": "final_frame",
+            "bytes": len(final_frame),
+        }] if final_frame and final_frame_url and final_frame_browser_url else [])],
     })
+
+
+def extract_final_frame(video_bytes: bytes) -> bytes | None:
+    with tempfile.TemporaryDirectory() as directory:
+        input_path = os.path.join(directory, "input.mp4")
+        output_path = os.path.join(directory, "final.jpg")
+        with open(input_path, "wb") as file:
+            file.write(video_bytes)
+        command = [
+            "ffmpeg", "-y", "-sseof", "-0.2", "-i", input_path,
+            "-frames:v", "1", "-q:v", "2", output_path,
+        ]
+        completed = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        if completed.returncode != 0 or not os.path.exists(output_path):
+            return None
+        with open(output_path, "rb") as file:
+            return file.read()
 
 
 def openai_error(response: httpx.Response, fallback: str) -> str:
@@ -143,6 +176,7 @@ async def execute_run(run_id: str, request: RunRequest) -> None:
 
         if not request.connection:
             raise ValueError("A live run requires session-scoped provider and B2 credentials")
+        request.connection = resolve_b2_connection(request.connection)
 
         if request.connection.provider == "openai":
             await generate_openai_video(run_id, request, spec_hash)
