@@ -26,6 +26,7 @@ function newProject(title = ""): Project { return { id: `project-${Date.now()}`,
 function readJson(response: Response) { return response.text().then((text) => { try { return JSON.parse(text); } catch { return { detail: text || `Request failed (${response.status})` }; } }); }
 function videoAsset(run: RunState) { return run.result?.assets?.find((asset) => (asset.media_type || "").startsWith("video") || asset.url.toLowerCase().split("?")[0].endsWith(".mp4")); }
 function frameAsset(run: RunState) { return run.result?.assets?.find((asset) => asset.role === "final_frame" || (asset.media_type || "").startsWith("image")); }
+function stableAssetUrl(url?: string) { return url ? url.split("?")[0] : undefined; }
 function displayTitle(title: string) { return title.trim() || "Untitled project"; }
 function shotTitle(shot: Shot) { return shot.title.trim() || `Shot ${String(shot.id).padStart(2, "0")}`; }
 const referenceRoles: Array<keyof CharacterReferences> = ["front", "threeQuarter", "profile", "body", "characteristics"];
@@ -161,11 +162,12 @@ export default function Home() {
   function uploadRef(key: keyof CharacterReferences, event: ChangeEvent<HTMLInputElement>) { const file = event.target.files?.[0]; if (!file) return; const reader = new FileReader(); reader.onload = () => saveProject({ ...project, characterReferences: { ...project.characterReferences, [key]: String(reader.result) } }); reader.readAsDataURL(file); }
 
   async function refreshGeneration(generationId: string): Promise<Generation | undefined> {
+    const existing = project.shots.flatMap((shot) => shot.generations).find((generation) => generation.id === generationId);
     const response = await fetch(`/api/runs/${encodeURIComponent(generationId)}`, { cache: "no-store" });
     const update = await readJson(response) as RunState & { detail?: string };
-    if (!response.ok || update.status !== "complete") return undefined;
+    if (!response.ok || update.status !== "complete") return existing ? refreshStoredGeneration(existing) : undefined;
     const video = videoAsset(update);
-    if (!video?.url) return undefined;
+    if (!video?.url) return existing ? refreshStoredGeneration(existing) : undefined;
     const frame = frameAsset(update);
     let refreshed: Generation | undefined;
     setProjects((items) => items.map((item) => item.id !== project.id ? item : {
@@ -183,6 +185,34 @@ export default function Home() {
           };
           return refreshed;
         }),
+      })),
+    }));
+    return refreshed;
+  }
+
+  async function refreshStoredGeneration(generation: Generation): Promise<Generation | undefined> {
+    const sourceVideo = generation.storageVideoUrl || stableAssetUrl(generation.videoUrl);
+    const sourceFrame = generation.storageFinalFrameUrl || stableAssetUrl(generation.finalFrameUrl);
+    if (!sourceVideo) return undefined;
+    const response = await fetch("/api/assets/presign", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ assets: { video: sourceVideo, finalFrame: sourceFrame } }),
+    });
+    const body = await readJson(response) as { assets?: { video?: string; finalFrame?: string }; detail?: string };
+    if (!response.ok || !body.assets?.video) return undefined;
+    const refreshed = {
+      ...generation,
+      videoUrl: body.assets.video,
+      finalFrameUrl: body.assets.finalFrame || generation.finalFrameUrl,
+      storageVideoUrl: sourceVideo,
+      storageFinalFrameUrl: sourceFrame,
+    };
+    setProjects((items) => items.map((item) => item.id !== project.id ? item : {
+      ...item,
+      shots: item.shots.map((shot) => ({
+        ...shot,
+        generations: shot.generations.map((item) => item.id === generation.id ? refreshed : item),
       })),
     }));
     return refreshed;

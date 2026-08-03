@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 from .database import create_run, get_run, initialize
 from .models import AssembleRequest, CharacterVisualRequest, ConnectionTest, RunCreated, RunRequest
 from .orchestrator import execute_run, openai_error
@@ -15,6 +16,10 @@ from .storage import presign_asset, put_asset, resolve_b2_connection, test_b2
 
 app = FastAPI(title="Continuity Media Worker", version="0.6.0")
 app.add_middleware(CORSMiddleware, allow_origins=[], allow_methods=["GET", "POST"], allow_headers=["*"])
+
+
+class PresignRequest(BaseModel):
+    assets: dict[str, str | None] = Field(default_factory=dict)
 
 
 @app.on_event("startup")
@@ -64,6 +69,20 @@ def refresh_result_asset_urls(result: dict | None, connection: ConnectionTest | 
         return {**result, "assets": refreshed_assets}
     except Exception:
         return result
+
+
+@app.post("/v1/assets/presign", dependencies=[Depends(authorize)])
+def presign_existing_assets(request: PresignRequest):
+    try:
+        connection = resolve_b2_connection(ConnectionTest(provider="openai", provider_api_key="server-managed"))
+        refreshed = {
+            name: presign_asset(connection, url)
+            for name, url in request.assets.items()
+            if url
+        }
+        return {"ok": True, "assets": refreshed}
+    except Exception as exc:
+        raise HTTPException(400, f"Could not refresh B2 asset links: {exc}") from exc
 
 
 @app.post("/v1/connections/test", dependencies=[Depends(authorize)])
