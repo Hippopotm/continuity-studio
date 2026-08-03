@@ -31,6 +31,9 @@ def openai_headers(request: RunRequest) -> dict[str, str]:
 def build_video_prompt(request: RunRequest) -> str:
     return (
         "Generate a realistic cinematic video shot from this locked continuity JSON. "
+        "The output must be exactly 4 seconds long unless the API duration parameter says otherwise. "
+        "If an input_reference image is provided by the API request, treat it as the mandatory first frame "
+        "of the video and continue motion from that image. "
         "Preserve character identity, wardrobe, environment, voice/audio cues, camera, "
         "screen direction, and motion exactly. Avoid animation, illustration, stylized "
         "flat art, identity drift, face changes, wardrobe changes, or impossible motion.\n\n"
@@ -39,8 +42,7 @@ def build_video_prompt(request: RunRequest) -> str:
 
 
 def select_duration(request: RunRequest) -> int:
-    shot_duration = request.specification.get("shot", {}).get("duration", 4)
-    return min((4, 8, 12), key=lambda value: abs(value - int(shot_duration)))
+    return 4
 
 
 def normalize_image_bytes(image_bytes: bytes, size: tuple[int, int] = (1280, 720)) -> bytes:

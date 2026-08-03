@@ -133,6 +133,13 @@ export default function Home() {
   const continuityJson = {
     schema_version: "2.0",
     project: { id: project.id, title: displayTitle(project.title) },
+    generation_contract: {
+      shot_duration_seconds: 4,
+      required_output_size: "1280x720",
+      required_frame_rate: "24fps",
+      timing_rule: "The complete visual action described in this shot must happen within exactly 4 seconds. Do not create an 8s, 12s, or open-ended scene.",
+      first_frame_rule: previousSelected?.finalFrameUrl ? "The previous selected shot final frame is mandatory first-frame continuity input for this shot." : "This is the first shot or no previous selected take exists, so character references are used instead of a previous frame.",
+    },
     character: {
       name: project.characterName,
       description: project.characterDescription,
@@ -141,7 +148,19 @@ export default function Home() {
       reference_generation_prompts: referencePrompts,
     },
     shot: { id: current.id, title: shotTitle(current), duration: current.duration, duration_seconds: current.duration, brief: current.brief },
-    multi_shot_handoff: { previous_final_frame_url: previousSelected?.finalFrameUrl || null, instruction: previousSelected?.finalFrameUrl ? "Use previous selected shot final frame as the first-frame reference and preserve identity, pose direction, wardrobe, lighting, and camera continuity." : "No previous shot reference yet." },
+    multi_shot_handoff: {
+      enabled: Boolean(previousSelected?.finalFrameUrl),
+      source_shot_id: previousShot?.id || null,
+      source_generation_id: previousSelected?.id || null,
+      previous_final_frame_url: previousSelected?.finalFrameUrl || null,
+      model_input_reference: previousSelected?.finalFrameUrl ? {
+        type: "first_frame_image",
+        url: previousSelected.finalFrameUrl,
+        required_usage: "The AI video generator must use this image as the first visual frame / input_reference for the new shot.",
+        preprocessing: "The backend re-signs the B2 URL if needed and normalizes this image to 1280x720 before sending it to the video provider.",
+      } : null,
+      instruction: previousSelected?.finalFrameUrl ? "Start the shot from the previous selected shot final frame, then complete this shot's action in exactly 4 seconds while preserving identity, pose direction, wardrobe, lighting, camera continuity, and scene geography." : "No previous shot reference yet.",
+    },
     negative_prompt: ["different face", "different skin tone", "different clothes", "cartoon look", "extra limbs", "motion glitch", "identity drift"],
   };
 
@@ -271,7 +290,24 @@ export default function Home() {
           ...continuityJson.character,
           references: Object.fromEntries(referenceRoles.map((key) => [key, { url: visualProject.characterReferences[key] || null, available: Boolean(visualProject.characterReferences[key]), role: refLabel(key) }])),
         },
-        multi_shot_handoff: { previous_final_frame_url: handoffFrameUrl, instruction: handoffFrameUrl ? "Use previous selected shot final frame as the first-frame reference and preserve identity, pose direction, wardrobe, lighting, and camera continuity." : "No previous shot reference yet." },
+        generation_contract: {
+          ...continuityJson.generation_contract,
+          shot_duration_seconds: 4,
+          first_frame_rule: handoffFrameUrl ? "The previous selected shot final frame is mandatory first-frame continuity input for this shot." : "This is the first shot or no previous selected take exists, so character references are used instead of a previous frame.",
+        },
+        multi_shot_handoff: {
+          enabled: Boolean(handoffFrameUrl),
+          source_shot_id: previousShot?.id || null,
+          source_generation_id: refreshedPrevious?.id || null,
+          previous_final_frame_url: handoffFrameUrl,
+          model_input_reference: handoffFrameUrl ? {
+            type: "first_frame_image",
+            url: handoffFrameUrl,
+            required_usage: "The AI video generator must use this image as the first visual frame / input_reference for the new shot.",
+            preprocessing: "The backend re-signs the B2 URL if needed and normalizes this image to 1280x720 before sending it to the video provider.",
+          } : null,
+          instruction: handoffFrameUrl ? "Start the shot from the previous selected shot final frame, then complete this shot's action in exactly 4 seconds while preserving identity, pose direction, wardrobe, lighting, camera continuity, and scene geography." : "No previous shot reference yet.",
+        },
         prompt_locking_rules: {
           fixed_keyword_order: "Repeat locked_keywords_in_order exactly and in order in every shot prompt.",
           identity_reference_priority: "Use uploaded character references first, then generated references, then previous final frame.",
