@@ -195,7 +195,7 @@ export default function Home() {
     setRun({ status: "queued" });
     try {
       const visualProject = await ensureCharacterVisuals(project);
-      const visualReferences = referenceRoles.map((key) => visualProject.characterReferences[key]).filter((value): value is string => Boolean(value) && !value.startsWith("data:"));
+      const visualReferences = previousSelected?.finalFrameUrl ? [] : referenceRoles.map((key) => visualProject.characterReferences[key]).filter((value): value is string => Boolean(value) && !value.startsWith("data:"));
       const shotSpec = {
         ...continuityJson,
         character: {

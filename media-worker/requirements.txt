@@ -8,3 +8,4 @@ genblaze==0.4.5
 genblaze-gmicloud==0.3.5
 genblaze-openai==0.3.4
 genblaze-s3==0.3.6
+pillow==11.3.0

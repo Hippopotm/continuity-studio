@@ -6,7 +6,9 @@ import os
 import subprocess
 import tempfile
 import time
+from io import BytesIO
 import httpx
+from PIL import Image, ImageOps
 from .database import update_run
 from .models import RunRequest
 from .storage import presign_asset, put_asset, resolve_b2_connection
@@ -41,6 +43,40 @@ def select_duration(request: RunRequest) -> int:
     return min((4, 8, 12), key=lambda value: abs(value - int(shot_duration)))
 
 
+def normalize_image_bytes(image_bytes: bytes, size: tuple[int, int] = (1280, 720)) -> bytes:
+    image = Image.open(BytesIO(image_bytes))
+    image = ImageOps.exif_transpose(image).convert("RGB")
+    image.thumbnail(size, Image.Resampling.LANCZOS)
+    canvas = Image.new("RGB", size, (8, 18, 20))
+    x = (size[0] - image.width) // 2
+    y = (size[1] - image.height) // 2
+    canvas.paste(image, (x, y))
+    output = BytesIO()
+    canvas.save(output, format="JPEG", quality=94, optimize=True)
+    return output.getvalue()
+
+
+async def prepare_video_reference(client: httpx.AsyncClient, request: RunRequest) -> str | None:
+    """Make any image reference match the requested OpenAI video dimensions.
+
+    OpenAI Sora rejects mismatched reference dimensions with:
+    "Inpaint image must match the requested width and height".
+    We normalize to 1280x720 and store the prepared reference in B2, then send
+    that browser-readable B2 URL to the video endpoint.
+    """
+    source_url = request.previous_clean_frame_url or (request.reference_urls[0] if request.reference_urls else None)
+    if not source_url:
+        return None
+    response = await client.get(source_url, follow_redirects=True)
+    if response.status_code >= 400 or len(response.content) < 256:
+        raise ValueError(f"Could not download continuity reference image ({response.status_code})")
+    normalized = normalize_image_bytes(response.content)
+    digest = hashlib.sha256(normalized).hexdigest()[:12]
+    key = f"continuity/{request.project_id}/{request.shot_id}/references/{digest}-1280x720.jpg"
+    stored_url = put_asset(request.connection, key, normalized, "image/jpeg")
+    return presign_asset(request.connection, stored_url)
+
+
 async def generate_openai_video(run_id: str, request: RunRequest, spec_hash: str) -> None:
     if not request.connection:
         raise ValueError("A live OpenAI run requires provider and B2 credentials")
@@ -52,12 +88,11 @@ async def generate_openai_video(run_id: str, request: RunRequest, spec_hash: str
         "seconds": str(select_duration(request)),
         "size": "1280x720",
     }
-    if request.reference_urls:
-        payload["input_reference"] = {"image_url": request.reference_urls[0]}
-    elif request.previous_clean_frame_url:
-        payload["input_reference"] = {"image_url": request.previous_clean_frame_url}
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(30, read=60)) as client:
+        reference_url = await prepare_video_reference(client, request)
+        if reference_url:
+            payload["input_reference"] = {"image_url": reference_url}
         create_response = await client.post(OPENAI_VIDEO_STATUS_URL, headers=headers, json=payload)
         if create_response.status_code >= 400:
             raise ValueError(openai_error(create_response, "OpenAI could not start the video job"))
