@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from .database import create_run, get_run, initialize
 from .models import AssembleRequest, CharacterVisualRequest, ConnectionTest, RunCreated, RunRequest
@@ -83,6 +84,15 @@ def presign_existing_assets(request: PresignRequest):
         return {"ok": True, "assets": refreshed}
     except Exception as exc:
         raise HTTPException(400, f"Could not refresh B2 asset links: {exc}") from exc
+
+
+@app.get("/v1/assets/play", dependencies=[Depends(authorize)])
+def play_existing_asset(url: str):
+    try:
+        connection = resolve_b2_connection(ConnectionTest(provider="openai", provider_api_key="server-managed"))
+        return RedirectResponse(presign_asset(connection, url), status_code=302)
+    except Exception as exc:
+        raise HTTPException(400, f"Could not open B2 asset: {exc}") from exc
 
 
 @app.post("/v1/connections/test", dependencies=[Depends(authorize)])
