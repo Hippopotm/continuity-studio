@@ -13,7 +13,7 @@ from .models import AssembleRequest, CharacterVisualRequest, ConnectionTest, Run
 from .orchestrator import execute_run, openai_error
 from .storage import presign_asset, put_asset, resolve_b2_connection, test_b2
 
-app = FastAPI(title="Continuity Media Worker", version="0.1.0")
+app = FastAPI(title="Continuity Media Worker", version="0.5.0")
 app.add_middleware(CORSMiddleware, allow_origins=[], allow_methods=["GET", "POST"], allow_headers=["*"])
 
 
@@ -43,7 +43,7 @@ def openai_test_headers(connection: ConnectionTest) -> dict[str, str]:
 
 @app.get("/health")
 def health():
-    return {"ok": True, "service": "continuity-media-worker", "version": "0.4.1"}
+    return {"ok": True, "service": "continuity-media-worker", "version": "0.5.0"}
 
 
 @app.post("/v1/connections/test", dependencies=[Depends(authorize)])
