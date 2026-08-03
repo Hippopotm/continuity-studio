@@ -27,9 +27,18 @@ def owner(x_continuity_user: str = Header(default="anonymous")) -> str:
     return x_continuity_user
 
 
+def openai_test_headers(connection: ConnectionTest) -> dict[str, str]:
+    headers = {"Authorization": f"Bearer {connection.provider_api_key.get_secret_value()}"}
+    if connection.openai_project_id:
+        headers["OpenAI-Project"] = connection.openai_project_id.strip()
+    if connection.openai_organization_id:
+        headers["OpenAI-Organization"] = connection.openai_organization_id.strip()
+    return headers
+
+
 @app.get("/health")
 def health():
-    return {"ok": True, "service": "continuity-media-worker", "version": "0.3.2"}
+    return {"ok": True, "service": "continuity-media-worker", "version": "0.3.3"}
 
 
 @app.post("/v1/connections/test", dependencies=[Depends(authorize)])
@@ -39,7 +48,7 @@ def test_connection(connection: ConnectionTest):
         if connection.provider == "openai":
             response = httpx.get(
                 "https://api.openai.com/v1/models/sora-2",
-                headers={"Authorization": f"Bearer {connection.provider_api_key.get_secret_value()}"},
+                headers=openai_test_headers(connection),
                 timeout=12,
             )
             if response.status_code >= 400:

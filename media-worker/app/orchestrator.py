@@ -12,6 +12,17 @@ from .storage import presign_asset, put_asset
 OPENAI_VIDEO_STATUS_URL = "https://api.openai.com/v1/videos"
 
 
+def openai_headers(request: RunRequest) -> dict[str, str]:
+    if not request.connection:
+        return {}
+    headers = {"Authorization": f"Bearer {request.connection.provider_api_key.get_secret_value()}"}
+    if request.connection.openai_project_id:
+        headers["OpenAI-Project"] = request.connection.openai_project_id.strip()
+    if request.connection.openai_organization_id:
+        headers["OpenAI-Organization"] = request.connection.openai_organization_id.strip()
+    return headers
+
+
 def build_video_prompt(request: RunRequest) -> str:
     return (
         "Generate a realistic cinematic video shot from this locked continuity JSON. "
@@ -31,8 +42,7 @@ async def generate_openai_video(run_id: str, request: RunRequest, spec_hash: str
     if not request.connection:
         raise ValueError("A live OpenAI run requires provider and B2 credentials")
 
-    provider_key = request.connection.provider_api_key.get_secret_value()
-    headers = {"Authorization": f"Bearer {provider_key}"}
+    headers = openai_headers(request)
     payload = {
         "model": "sora-2",
         "prompt": build_video_prompt(request),

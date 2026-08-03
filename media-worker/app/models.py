@@ -5,6 +5,8 @@ from pydantic import BaseModel, Field, SecretStr
 class ConnectionTest(BaseModel):
     provider: Literal["gmicloud", "openai", "google", "runway", "luma"]
     provider_api_key: SecretStr
+    openai_project_id: str | None = None
+    openai_organization_id: str | None = None
     b2_key_id: SecretStr
     b2_app_key: SecretStr
     b2_bucket: str
