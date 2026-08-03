@@ -1,3 +1,6 @@
+import base64
+import hashlib
+import json
 import os
 import uuid
 import httpx
@@ -6,8 +9,8 @@ import tempfile
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from .database import create_run, get_run, initialize
-from .models import AssembleRequest, ConnectionTest, RunCreated, RunRequest
-from .orchestrator import execute_run
+from .models import AssembleRequest, CharacterVisualRequest, ConnectionTest, RunCreated, RunRequest
+from .orchestrator import execute_run, openai_error
 from .storage import presign_asset, put_asset, resolve_b2_connection, test_b2
 
 app = FastAPI(title="Continuity Media Worker", version="0.1.0")
@@ -72,6 +75,98 @@ def start_run(request: RunRequest, background: BackgroundTasks, current_owner: s
     mode = "live" if request.connection else "demo"
     return RunCreated(id=run_id, status="queued" if mode == "live" else "demo",
                       estimated_cost_usd=min(request.budget_usd, 0.73), mode=mode)
+
+
+def decode_data_url(value: str) -> tuple[bytes, str] | None:
+    if not value.startswith("data:") or ";base64," not in value:
+        return None
+    header, encoded = value.split(",", 1)
+    content_type = header.removeprefix("data:").split(";", 1)[0] or "image/png"
+    return base64.b64decode(encoded), content_type
+
+
+def image_prompt(role: str, character: dict) -> str:
+    description = character.get("description") or ""
+    keywords = character.get("locked_keywords_in_order") or []
+    keyword_text = ", ".join(keywords) if isinstance(keywords, list) else str(keywords)
+    role_guidance = {
+        "front": "front-facing portrait, neutral expression, face centered, both ears/cheeks visible",
+        "threeQuarter": "three-quarter portrait, same exact person, head turned slightly, natural depth",
+        "profile": "side profile portrait, same exact person, precise nose, chin, hairline and facial marks",
+        "body": "full-body standing reference, same exact person, full outfit visible from head to shoes",
+        "characteristics": "close visual reference of the specific unique traits, face marks, hair texture, accessories, and clothing details",
+    }.get(role, role)
+    return (
+        "Create a photorealistic character reference image for a continuity-locked AI video workflow. "
+        "Use a plain neutral studio background, natural 50mm lens look, realistic skin texture, no illustration, no cartoon style. "
+        f"Role: {role_guidance}. Character description: {description}. Locked keywords in this exact order: {keyword_text}. "
+        "Do not change identity, age, skin tone, hairstyle, body type, wardrobe, or unique characteristics."
+    )
+
+
+@app.post("/v1/character-visuals", dependencies=[Depends(authorize)])
+async def create_character_visuals(request: CharacterVisualRequest, current_owner: str = Depends(owner)):
+    try:
+        connection = resolve_b2_connection(request.connection)
+        headers = openai_test_headers(connection)
+        references: dict[str, str] = {}
+        generated: list[str] = []
+        uploaded: list[str] = []
+        roles = request.required_roles or ["front", "threeQuarter", "profile", "body", "characteristics"]
+
+        for role, value in request.references.items():
+            if not value:
+                continue
+            decoded = decode_data_url(value)
+            if decoded:
+                body, content_type = decoded
+                ext = "jpg" if "jpeg" in content_type or "jpg" in content_type else "png"
+                digest = hashlib.sha256(body).hexdigest()[:12]
+                key = f"continuity/{request.project_id}/characters/{role}-{digest}.{ext}"
+                stored_url = put_asset(connection, key, body, content_type)
+                references[role] = presign_asset(connection, stored_url)
+                uploaded.append(role)
+            else:
+                references[role] = value
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30, read=90)) as client:
+            for role in roles:
+                if references.get(role):
+                    continue
+                response = await client.post(
+                    "https://api.openai.com/v1/images/generations",
+                    headers=headers,
+                    json={
+                        "model": "gpt-image-1",
+                        "prompt": image_prompt(role, request.character),
+                        "size": "1024x1024",
+                    },
+                )
+                if response.status_code >= 400:
+                    raise ValueError(openai_error(response, "OpenAI image generation failed"))
+                body = response.json()
+                b64 = (body.get("data") or [{}])[0].get("b64_json")
+                if not b64:
+                    raise ValueError("OpenAI did not return image bytes")
+                image_bytes = base64.b64decode(b64)
+                key = f"continuity/{request.project_id}/characters/{role}-{uuid.uuid4().hex}.png"
+                stored_url = put_asset(connection, key, image_bytes, "image/png")
+                references[role] = presign_asset(connection, stored_url)
+                generated.append(role)
+        manifest = {
+            "project_id": request.project_id,
+            "owner": current_owner,
+            "character": request.character,
+            "references": references,
+            "generated_roles": generated,
+            "uploaded_roles": uploaded,
+        }
+        manifest_bytes = json.dumps(manifest, indent=2, sort_keys=True).encode()
+        manifest_key = f"continuity/{request.project_id}/characters/manifest-{uuid.uuid4().hex}.json"
+        manifest_url = put_asset(connection, manifest_key, manifest_bytes, "application/json")
+        return {"ok": True, "references": references, "generated_roles": generated, "uploaded_roles": uploaded, "manifest_url": presign_asset(connection, manifest_url)}
+    except Exception as exc:
+        raise HTTPException(400, f"Character visuals failed: {exc}") from exc
 
 
 @app.post("/v1/assemble", dependencies=[Depends(authorize)])

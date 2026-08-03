@@ -37,3 +37,11 @@ class AssembleRequest(BaseModel):
     title: str = "Continuity film"
     assets: list[str] = Field(min_length=1)
     connection: ConnectionTest | None = None
+
+
+class CharacterVisualRequest(BaseModel):
+    project_id: str
+    character: dict[str, Any]
+    references: dict[str, str | None] = Field(default_factory=dict)
+    required_roles: list[str] = Field(default_factory=list)
+    connection: ConnectionTest

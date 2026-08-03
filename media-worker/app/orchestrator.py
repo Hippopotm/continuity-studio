@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -57,8 +58,7 @@ async def generate_openai_video(run_id: str, request: RunRequest, spec_hash: str
         payload["input_reference"] = {"image_url": request.previous_clean_frame_url}
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(30, read=60)) as client:
-        files = {key: (None, value if isinstance(value, str) else json.dumps(value)) for key, value in payload.items()}
-        create_response = await client.post(OPENAI_VIDEO_STATUS_URL, headers=headers, files=files)
+        create_response = await client.post(OPENAI_VIDEO_STATUS_URL, headers=headers, json=payload)
         if create_response.status_code >= 400:
             raise ValueError(openai_error(create_response, "OpenAI could not start the video job"))
 
@@ -151,6 +151,14 @@ def openai_error(response: httpx.Response, fallback: str) -> str:
         return f"{fallback} ({response.status_code})"
     detail = body.get("error", {}).get("message") or body.get("message") or body.get("detail")
     return f"{detail or fallback} ({response.status_code})"
+
+
+def decode_data_url(value: str) -> tuple[bytes, str] | None:
+    if not value.startswith("data:") or ";base64," not in value:
+        return None
+    header, encoded = value.split(",", 1)
+    content_type = header.removeprefix("data:").split(";", 1)[0] or "image/png"
+    return base64.b64decode(encoded), content_type
 
 
 async def execute_run(run_id: str, request: RunRequest) -> None:
