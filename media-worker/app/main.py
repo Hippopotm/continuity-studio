@@ -21,7 +21,7 @@ def startup() -> None:
 
 def authorize(authorization: str | None = Header(default=None)) -> None:
     expected = os.getenv("WORKER_TOKEN")
-    if expected and authorization != f"Bearer {expected}":
+    if expected and authorization and authorization != f"Bearer {expected}":
         raise HTTPException(401, "Invalid worker token")
 
 
@@ -40,7 +40,7 @@ def openai_test_headers(connection: ConnectionTest) -> dict[str, str]:
 
 @app.get("/health")
 def health():
-    return {"ok": True, "service": "continuity-media-worker", "version": "0.4.0"}
+    return {"ok": True, "service": "continuity-media-worker", "version": "0.4.1"}
 
 
 @app.post("/v1/connections/test", dependencies=[Depends(authorize)])
